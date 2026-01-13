@@ -41,3 +41,13 @@ futures = "0.3"
 
 # For getting the system hostname
 hostname = "0.3"
+
+# WebSocket client for relay server
+tokio-tungstenite = { workspace = true }
+
+# For URL parsing
+url = "2.5"
+
+# Command-line argument parsing
+clap = { version = "4", features = ["derive"] }
+

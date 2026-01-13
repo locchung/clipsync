@@ -54,6 +54,8 @@ cargo install --git https://github.com/locchung/clipsync --bin clipsync
 
 ### Usage
 
+#### Local Network Mode (Default)
+
 Run `clipsync` on each device you want to sync:
 
 ```bash
@@ -70,6 +72,7 @@ That's it! Copy text on one device, and it automatically appears on the other.
 🔗 ClipSync - Clipboard Sharing
 ================================
 Device: laptop-a (fd26de72)
+Mode: Local Network
 📡 Listening on port 43210
 🔍 Discovering peers on local network...
 
@@ -79,10 +82,43 @@ Device: laptop-a (fd26de72)
 📥 laptop-b -> "Reply from Laptop B!"
 ```
 
+#### Cloud Relay Mode (Different Networks)
+
+For syncing across different networks (e.g., home and office), use relay mode:
+
+```bash
+# Device A: Create a room
+clipsync --relay --create-room
+
+# Output:
+# 🔗 ClipSync - Clipboard Sharing
+# ================================
+# Device: laptop-a (fd26de72)
+# Mode: Cloud Relay
+# 📋 Created room: ABC123
+# Share this code with other devices to sync clipboards!
+
+# Device B: Join the room using the code
+clipsync --relay --join ABC123
+```
+
+**CLI Options:**
+| Flag | Description |
+|------|-------------|
+| `--relay` | Enable cloud relay mode |
+| `--server <URL>` | Custom relay server URL (default: `ws://109.123.237.29:3002`) |
+| `--create-room` | Create a new room (returns a 6-character code) |
+| `--join <CODE>` | Join an existing room by code |
+
 ### Prerequisites
 
+**Local Mode:**
 - Two or more devices on the **same local network**
 - That's it! No accounts, no server, no configuration
+
+**Cloud Mode:**
+- A relay server (you can self-host or use the default server)
+- Share the room code between devices
 
 ---
 
@@ -92,7 +128,7 @@ Device: laptop-a (fd26de72)
 cargo run --bin clipsync-server
 ```
 
-The relay server starts on `http://0.0.0.0:3000` with the following endpoints:
+The relay server starts on `http://0.0.0.0:3002` with the following endpoints:
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|

@@ -1,17 +1,36 @@
 //! # ClipSync CLI
 //!
-//! A command-line tool for clipboard sharing between devices on the same network.
+//! A command-line tool for clipboard sharing between devices.
 //!
-//! ## How It Works
+//! ## Modes of Operation
 //!
+//! ### Local Network Mode (default)
 //! 1. Announces via UDP broadcast + mDNS (dual discovery for reliability)
 //! 2. Discovers other ClipSync instances automatically
 //! 3. Connects via TCP for clipboard sync
 //! 4. Monitors local clipboard and syncs changes to peers
 //!
+//! ### Cloud Relay Mode (`--relay`)
+//! 1. Connects to a relay server via WebSocket
+//! 2. Creates or joins a room using a 6-character code
+//! 3. Clipboard updates are relayed through the server
+//! 4. Works across different networks (internet)
+//!
 //! ## Usage
 //!
-//! Just run `clipsync` on each device. They'll find each other automatically!
+//! Local mode (same network):
+//! ```bash
+//! clipsync
+//! ```
+//!
+//! Cloud mode (different networks):
+//! ```bash
+//! # Device A: Create a room
+//! clipsync --relay --create-room
+//!
+//! # Device B: Join the room
+//! clipsync --relay --join ABC123
+//! ```
 
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket};
@@ -21,6 +40,10 @@ use std::time::Duration;
 use anyhow::Result;
 use arboard::Clipboard;
 use chrono::Utc;
+use clap::Parser;
+use futures::{SinkExt, StreamExt};
+use tokio_tungstenite::{connect_async, tungstenite::protocol::Message as WsMessage};
+use url::Url;
 
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
@@ -31,7 +54,6 @@ use clipsync_core::device::{Device, DeviceType};
 use clipsync_core::discovery::{DiscoveryEvent, DiscoveryService, DEFAULT_PORT};
 use clipsync_core::protocol::Message;
 use clipsync_core::DeviceId;
-use uuid::Uuid;
 
 const BROADCAST_PORT: u16 = 43211;
 
@@ -78,6 +100,30 @@ impl AppState {
 }
 
 // ============================================================================
+// CLI ARGUMENTS
+// ============================================================================
+/// ClipSync - Cross-platform clipboard sharing
+#[derive(Parser)]
+#[command(name = "clipsync", about = "Cross-platform clipboard sharing")]
+struct Args {
+    /// Enable cloud relay mode (connect via relay server)
+    #[arg(long)]
+    relay: bool,
+
+    /// Relay server URL (default: ws://109.123.237.29:3002)
+    #[arg(long, default_value = "ws://109.123.237.29:3002")]
+    server: String,
+
+    /// Create a new room (returns a join code)
+    #[arg(long)]
+    create_room: bool,
+
+    /// Join an existing room by code
+    #[arg(long)]
+    join: Option<String>,
+}
+
+// ============================================================================
 // MAIN
 // ============================================================================
 #[tokio::main]
@@ -92,12 +138,28 @@ async fn main() -> Result<()> {
         )
         .init();
 
+    // Parse command-line arguments
+    let args = Args::parse();
+
     // Create our device identity
     let device = Device::new(&get_device_name()).with_type(DeviceType::Desktop);
 
     info!("🔗 ClipSync - Clipboard Sharing");
     info!("================================");
     info!("Device: {} ({})", device.name, &device.id.to_string()[..8]);
+
+    if args.relay {
+        // Cloud relay mode
+        run_relay_mode(device, args).await
+    } else {
+        // Local network mode
+        run_local_mode(device).await
+    }
+}
+
+/// Run in local network mode (mDNS + UDP discovery)
+async fn run_local_mode(device: Device) -> Result<()> {
+    info!("Mode: Local Network");
     info!("Press Ctrl+C to exit\n");
 
     // Create shared state
@@ -116,7 +178,6 @@ async fn main() -> Result<()> {
     tokio::spawn(monitor_clipboard(state_clone));
 
     // Start UDP broadcast discovery (simple and reliable)
-    let state_clone = Arc::clone(&state);
     let device_clone = device.clone();
     tokio::spawn(udp_broadcast_sender(device_clone));
     
@@ -595,3 +656,335 @@ async fn monitor_clipboard(state: Arc<AppState>) {
         }
     }
 }
+
+// ============================================================================
+// RELAY MODE (Cloud Sync)
+// ============================================================================
+
+/// Run in cloud relay mode (WebSocket through relay server)
+async fn run_relay_mode(device: Device, args: Args) -> Result<()> {
+    info!("Mode: Cloud Relay");
+    info!("Server: {}", args.server);
+
+    // Determine room ID
+    let room_id = if args.create_room {
+        // Create a new room via HTTP POST
+        create_room(&args.server).await?
+    } else if let Some(code) = args.join {
+        code.to_uppercase()
+    } else {
+        anyhow::bail!(
+            "In relay mode, you must either:\n  \
+             --create-room  Create a new room\n  \
+             --join <CODE>  Join an existing room"
+        );
+    };
+
+    info!("Room: {}", room_id);
+    info!("Press Ctrl+C to exit\n");
+
+    // Convert HTTP URL to WebSocket URL
+    let ws_url = build_ws_url(&args.server, &room_id)?;
+    info!("🔌 Connecting to relay server...");
+
+    // Connect to WebSocket
+    let (ws_stream, _) = connect_async(&ws_url).await?;
+    info!("✅ Connected to relay server");
+
+    let (mut ws_sender, mut ws_receiver) = ws_stream.split();
+
+    // Send hello message
+    let hello = Message::Pong {
+        device_id: device.id.clone(),
+        device_name: device.name.clone(),
+        local_address: "relay".to_string(),
+        port: 0,
+    };
+    let hello_json = serde_json::to_string(&hello)?;
+    ws_sender.send(WsMessage::Text(hello_json.into())).await?;
+
+    // State for relay mode
+    let last_set_content: Arc<RwLock<Option<String>>> = Arc::new(RwLock::new(None));
+    let last_received_timestamp: Arc<RwLock<Option<chrono::DateTime<Utc>>>> = 
+        Arc::new(RwLock::new(None));
+
+    // Channel for sending clipboard updates
+    let (clipboard_tx, mut clipboard_rx) = tokio::sync::mpsc::channel::<Message>(16);
+
+    // Spawn clipboard monitor for relay mode
+    let device_clone = device.clone();
+    let clipboard_tx_clone = clipboard_tx.clone();
+    let last_set_clone = Arc::clone(&last_set_content);
+    tokio::spawn(async move {
+        monitor_clipboard_relay(device_clone, clipboard_tx_clone, last_set_clone).await;
+    });
+
+    // Main loop: handle WebSocket messages and clipboard updates
+    loop {
+        tokio::select! {
+            // Send local clipboard updates to relay
+            Some(msg) = clipboard_rx.recv() => {
+                let json = serde_json::to_string(&msg)?;
+                if ws_sender.send(WsMessage::Text(json.into())).await.is_err() {
+                    error!("Failed to send to relay server");
+                    break;
+                }
+            }
+
+            // Receive messages from relay
+            Some(result) = ws_receiver.next() => {
+                match result {
+                    Ok(WsMessage::Text(text)) => {
+                        if let Ok(msg) = serde_json::from_str::<Message>(&text) {
+                            handle_relay_message(
+                                msg, 
+                                &device, 
+                                &last_set_content,
+                                &last_received_timestamp,
+                            ).await;
+                        }
+                    }
+                    Ok(WsMessage::Close(_)) => {
+                        info!("Relay server closed connection");
+                        break;
+                    }
+                    Err(e) => {
+                        error!("WebSocket error: {}", e);
+                        break;
+                    }
+                    _ => {}
+                }
+            }
+
+            // Handle Ctrl+C
+            _ = tokio::signal::ctrl_c() => {
+                info!("\n👋 Shutting down...");
+                break;
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Create a new room on the relay server
+async fn create_room(server_url: &str) -> Result<String> {
+    // Convert ws:// to http:// for REST API
+    let http_url = server_url
+        .replace("ws://", "http://")
+        .replace("wss://", "https://");
+    
+    let url = format!("{}/rooms", http_url);
+    
+    // Use a simple HTTP client (we'll use reqwest-like approach with hyper)
+    // For simplicity, we'll use a manual TCP connection
+    let parsed_url = Url::parse(&url)?;
+    let host = parsed_url.host_str().ok_or_else(|| anyhow::anyhow!("Invalid server URL"))?;
+    let port = parsed_url.port().unwrap_or(3002);
+    
+    let addr = format!("{}:{}", host, port);
+    let mut stream = TcpStream::connect(&addr).await?;
+    
+    let request = format!(
+        "POST /rooms HTTP/1.1\r\n\
+         Host: {}\r\n\
+         Content-Length: 0\r\n\
+         Connection: close\r\n\
+         \r\n",
+        host
+    );
+    
+    stream.write_all(request.as_bytes()).await?;
+    
+    let mut reader = BufReader::new(stream);
+    let mut response = String::new();
+    
+    // Read response
+    loop {
+        let mut line = String::new();
+        if reader.read_line(&mut line).await? == 0 {
+            break;
+        }
+        response.push_str(&line);
+        if line == "\r\n" {
+            // Read body
+            let mut body = String::new();
+            reader.read_line(&mut body).await?;
+            response.push_str(&body);
+            break;
+        }
+    }
+    
+    // Parse JSON response to get room_id
+    // Response format: {"room_id":"ABC123"}
+    if let Some(start) = response.find("\"room_id\":\"") {
+        let start = start + 11;
+        if let Some(end) = response[start..].find('"') {
+            let room_id = &response[start..start + end];
+            info!("📋 Created room: {}", room_id);
+            info!("Share this code with other devices to sync clipboards!\n");
+            return Ok(room_id.to_string());
+        }
+    }
+    
+    anyhow::bail!("Failed to parse room creation response")
+}
+
+/// Build WebSocket URL from server URL and room ID
+fn build_ws_url(server_url: &str, room_id: &str) -> Result<String> {
+    // Ensure ws:// or wss:// prefix
+    let base_url = if server_url.starts_with("ws://") || server_url.starts_with("wss://") {
+        server_url.to_string()
+    } else if server_url.starts_with("http://") {
+        server_url.replace("http://", "ws://")
+    } else if server_url.starts_with("https://") {
+        server_url.replace("https://", "wss://")
+    } else {
+        format!("ws://{}", server_url)
+    };
+    
+    // Remove trailing slash if present
+    let base = base_url.trim_end_matches('/');
+    
+    Ok(format!("{}/rooms/{}/ws", base, room_id))
+}
+
+/// Handle incoming message from relay server
+async fn handle_relay_message(
+    msg: Message,
+    device: &Device,
+    last_set_content: &Arc<RwLock<Option<String>>>,
+    last_received_timestamp: &Arc<RwLock<Option<chrono::DateTime<Utc>>>>,
+) {
+    match msg {
+        Message::ClipboardSync {
+            from_device,
+            device_name,
+            content,
+            timestamp,
+        } => {
+            // Skip if from ourselves
+            if from_device == device.id {
+                return;
+            }
+
+            // Check timestamp for conflict resolution (last-write-wins)
+            {
+                let last_ts = last_received_timestamp.read().await;
+                if let Some(last) = *last_ts {
+                    if timestamp <= last {
+                        debug!("Ignoring older clipboard update");
+                        return;
+                    }
+                }
+            }
+
+            // Update last received timestamp
+            {
+                let mut last_ts = last_received_timestamp.write().await;
+                *last_ts = Some(timestamp);
+            }
+
+            // Set local clipboard
+            match Clipboard::new() {
+                Ok(mut clipboard) => {
+                    // Remember what we're setting (to avoid echo)
+                    {
+                        let mut last = last_set_content.write().await;
+                        *last = Some(content.clone());
+                    }
+
+                    if let Err(e) = clipboard.set_text(&content) {
+                        error!("Failed to set clipboard: {}", e);
+                    } else {
+                        let preview = if content.len() > 50 {
+                            format!("{}...", &content[..50])
+                        } else {
+                            content.clone()
+                        };
+                        info!("📥 {} -> \"{}\"", device_name, preview);
+                    }
+                }
+                Err(e) => {
+                    error!("Failed to access clipboard: {}", e);
+                }
+            }
+        }
+        Message::Error { message, .. } => {
+            error!("Server error: {}", message);
+        }
+        _ => {
+            debug!("Received message: {}", msg.message_type());
+        }
+    }
+}
+
+/// Monitor clipboard and send updates through relay
+async fn monitor_clipboard_relay(
+    device: Device,
+    tx: tokio::sync::mpsc::Sender<Message>,
+    last_set_content: Arc<RwLock<Option<String>>>,
+) {
+    let mut clipboard = match Clipboard::new() {
+        Ok(c) => c,
+        Err(e) => {
+            error!("Failed to access clipboard: {}", e);
+            return;
+        }
+    };
+
+    let mut last_content: Option<String> = None;
+
+    loop {
+        // Poll clipboard every 200ms
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        // Get current clipboard text
+        let current = match clipboard.get_text() {
+            Ok(text) => Some(text),
+            Err(_) => None,
+        };
+
+        // Check if changed
+        if current != last_content {
+            if let Some(ref text) = current {
+                // Check if this is content we just set (avoid echo)
+                {
+                    let last_set = last_set_content.read().await;
+                    if let Some(ref last) = *last_set {
+                        if last == text {
+                            last_content = current;
+                            continue;
+                        }
+                    }
+                }
+
+                // Clear the last set content
+                {
+                    let mut last_set = last_set_content.write().await;
+                    *last_set = None;
+                }
+
+                // Send to relay
+                let msg = Message::ClipboardSync {
+                    from_device: device.id.clone(),
+                    device_name: device.name.clone(),
+                    content: text.clone(),
+                    timestamp: Utc::now(),
+                };
+
+                if tx.send(msg).await.is_ok() {
+                    let preview = if text.len() > 50 {
+                        format!("{}...", &text[..50])
+                    } else {
+                        text.clone()
+                    };
+                    info!("📤 Synced: \"{}\" -> relay", preview);
+                }
+            }
+
+            last_content = current;
+        }
+    }
+}
+

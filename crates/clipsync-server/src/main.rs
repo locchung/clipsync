@@ -190,7 +190,7 @@ async fn main() -> anyhow::Result<()> {
         .with_state(state);
 
     // Start the server
-    let addr = "0.0.0.0:3000";
+    let addr = "0.0.0.0:3002";
     info!("Listening on http://{}", addr);
 
     let listener = tokio::net::TcpListener::bind(addr).await?;
