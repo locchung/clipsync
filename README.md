@@ -37,11 +37,18 @@ clipsync/
 
 ### Install (One Command)
 
+**Linux / macOS:**
 ```bash
-# Option 1: Install script (downloads pre-built binary)
 curl -fsSL https://raw.githubusercontent.com/locchung/clipsync/main/install.sh | sh
+```
 
-# Option 2: If you have Rust installed
+**Windows (PowerShell):**
+```powershell
+iwr -useb https://raw.githubusercontent.com/locchung/clipsync/main/install.ps1 | iex
+```
+
+**With Rust installed (any OS):**
+```bash
 cargo install --git https://github.com/locchung/clipsync --bin clipsync
 ```
 
