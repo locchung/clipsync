@@ -1,0 +1,84 @@
+# ClipSync - Cross-Platform Clipboard Sharing
+# ============================================
+# This is your Rust WORKSPACE - think of it as a "monorepo" that contains
+# multiple related packages (called "crates" in Rust).
+#
+# A workspace lets you:
+# - Share code between crates
+# - Compile everything together
+# - Have one Cargo.lock for consistent dependencies
+
+[workspace]
+# resolver = "2" is the modern dependency resolver (Rust 2021+)
+# It handles feature flags more intelligently
+resolver = "2"
+
+# List all the crates in our workspace
+# Each path points to a folder containing another Cargo.toml
+members = [
+    "crates/clipsync-core",       # Shared library (data types, crypto, protocol)
+    "crates/clipsync-server",     # Cloud relay server
+    "crates/clipsync-desktop",    # Desktop app (Tauri)
+    "crates/clipsync-cli",        # CLI tool for local network sync
+]
+
+# Workspace-wide dependencies
+# Any crate in the workspace can use these with { workspace = true }
+# This ensures all crates use the SAME version of each dependency
+[workspace.dependencies]
+# === Core Dependencies ===
+# tokio: Async runtime - lets us do non-blocking I/O (network, file, etc.)
+# "full" feature enables all sub-features (timers, sync primitives, etc.)
+tokio = { version = "1", features = ["full"] }
+
+# serde: SERialize/DEserialize - converts Rust structs to/from JSON, bytes, etc.
+# "derive" feature gives us #[derive(Serialize, Deserialize)] macros
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# uuid: Universally Unique IDentifier - generates random IDs like "550e8400-e29b-..."
+uuid = { version = "1", features = ["v4", "serde"] }
+
+# chrono: Date/time handling (timestamps, timezones)
+chrono = { version = "0.4", features = ["serde"] }
+
+# === Async/Error Handling ===
+# thiserror: Makes it easy to define custom error types
+thiserror = "1"
+# anyhow: For simpler error handling when you don't need custom types
+anyhow = "1"
+
+# === Networking ===
+# axum: Modern web framework built on tokio
+axum = { version = "0.7", features = ["ws"] }
+# WebSocket support for axum
+axum-extra = { version = "0.9", features = ["typed-header"] }
+# tokio-tungstenite: WebSocket client/server
+tokio-tungstenite = "0.21"
+# Tower: Middleware for async services (used by axum)
+tower = "0.4"
+tower-http = { version = "0.5", features = ["cors", "trace"] }
+
+# === Crypto ===
+# aes-gcm: AES-256-GCM authenticated encryption (fast, secure)
+aes-gcm = "0.10"
+# x25519: Elliptic curve Diffie-Hellman for key exchange
+x25519-dalek = { version = "2", features = ["static_secrets"] }
+# rand: Random number generation
+rand = "0.8"
+# base64: Encode binary data as text (for QR codes, etc.)
+base64 = "0.21"
+
+# === Local Network Discovery ===
+# mdns-sd: Multicast DNS for finding devices on local network
+mdns-sd = "0.10"
+
+# === Desktop (Tauri) ===
+# tauri: Framework for building desktop apps with web frontend
+tauri = "2"
+# arboard: Cross-platform clipboard access
+arboard = "3"
+
+# === Logging ===
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }

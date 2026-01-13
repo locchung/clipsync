@@ -1,0 +1,24 @@
+# Build artifacts
+/target/
+
+# Cargo.lock is recommended to commit for binaries, keep it
+# Uncomment the line below for library-only projects:
+# Cargo.lock
+
+# IDE/Editor
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Environment files
+.env
+.env.local
+
+# Debug files
+*.log

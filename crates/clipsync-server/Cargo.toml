@@ -1,0 +1,45 @@
+[package]
+name = "clipsync-server"
+version = "0.1.0"
+edition = "2021"
+
+# This is a BINARY crate (an executable program)
+# Different from clipsync-core which is a library crate
+
+[[bin]]
+# The binary will be named "clipsync-server"
+name = "clipsync-server"
+path = "src/main.rs"
+
+[dependencies]
+# Use our shared core library
+clipsync-core = { path = "../clipsync-core" }
+
+# Web framework and async runtime
+tokio = { workspace = true }
+axum = { workspace = true }
+axum-extra = { workspace = true }
+tower = { workspace = true }
+tower-http = { workspace = true }
+
+# WebSocket support
+tokio-tungstenite = { workspace = true }
+
+# Serialization
+serde = { workspace = true }
+serde_json = { workspace = true }
+uuid = { workspace = true }
+
+# Error handling
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+
+# Logging
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+# For WebSocket handling with futures
+futures = "0.3"
+
+# Random number generation for room IDs
+rand = { workspace = true }

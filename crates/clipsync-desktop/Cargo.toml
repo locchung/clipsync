@@ -1,0 +1,21 @@
+[package]
+name = "clipsync-desktop"
+version = "0.1.0"
+edition = "2021"
+
+# This will become a Tauri app, but for now it's a placeholder
+# so the workspace compiles
+
+[[bin]]
+name = "clipsync-desktop"
+path = "src/main.rs"
+
+[dependencies]
+clipsync-core = { path = "../clipsync-core" }
+tokio = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+# Cross-platform clipboard access
+arboard = { workspace = true }

@@ -1,0 +1,41 @@
+[package]
+# Every Rust crate needs a name, version, and edition
+name = "clipsync-core"
+version = "0.1.0"
+# edition = "2021" means we use modern Rust syntax (2021 edition)
+# Older code might use "2018" or "2015"
+edition = "2021"
+
+# [lib] section configures this as a LIBRARY crate (not an executable)
+# Other crates can depend on this and use its code
+[lib]
+# crate-type tells Rust what kind of library to build:
+# - "lib": Standard Rust library (default)
+# - "cdylib": C-compatible dynamic library (needed for mobile FFI later)
+# - "staticlib": Static library (for linking into other languages)
+crate-type = ["lib", "cdylib"]
+
+# Dependencies: { workspace = true } means "use the version from root Cargo.toml"
+# This keeps all crates using the same versions
+[dependencies]
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+uuid = { workspace = true }
+chrono = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+aes-gcm = { workspace = true }
+x25519-dalek = { workspace = true }
+rand = { workspace = true }
+base64 = { workspace = true }
+mdns-sd = { workspace = true }
+tokio-tungstenite = { workspace = true }
+tracing = { workspace = true }
+
+# "bytes" is for efficient byte buffer handling
+bytes = "1"
+# "futures" provides utilities for async programming
+futures = "0.3"
+# "hostname" for getting the system hostname
+hostname = "0.3"

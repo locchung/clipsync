@@ -1,0 +1,40 @@
+[package]
+name = "clipsync-cli"
+version = "0.1.0"
+edition = "2021"
+description = "Cross-platform clipboard sharing CLI"
+license = "MIT"
+
+[[bin]]
+name = "clipsync"
+path = "src/main.rs"
+
+[dependencies]
+# Core library with types, discovery, and protocol
+clipsync-core = { path = "../clipsync-core" }
+
+# Async runtime
+tokio = { workspace = true }
+
+# Clipboard access
+arboard = { workspace = true }
+
+# Serialization
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# Date/time
+chrono = { workspace = true }
+
+# Error handling
+anyhow = { workspace = true }
+
+# Logging
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+# Async utilities
+futures = "0.3"
+
+# For getting the system hostname
+hostname = "0.3"
