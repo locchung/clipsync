@@ -4,18 +4,17 @@
 //!
 //! ## How It Works
 //!
-//! 1. Announces our presence on the network via mDNS
-//! 2. Discovers other ClipSync instances
+//! 1. Announces via UDP broadcast + mDNS (dual discovery for reliability)
+//! 2. Discovers other ClipSync instances automatically
 //! 3. Connects via TCP for clipboard sync
 //! 4. Monitors local clipboard and syncs changes to peers
-//! 5. Receives clipboard updates from peers and applies them locally
 //!
 //! ## Usage
 //!
 //! Just run `clipsync` on each device. They'll find each other automatically!
 
 use std::collections::HashMap;
-use std::net::SocketAddr;
+use std::net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -32,6 +31,9 @@ use clipsync_core::device::{Device, DeviceType};
 use clipsync_core::discovery::{DiscoveryEvent, DiscoveryService, DEFAULT_PORT};
 use clipsync_core::protocol::Message;
 use clipsync_core::DeviceId;
+use uuid::Uuid;
+
+const BROADCAST_PORT: u16 = 43211;
 
 // ============================================================================
 // PEER CONNECTION
@@ -101,26 +103,36 @@ async fn main() -> Result<()> {
     // Create shared state
     let state = AppState::new(device.clone());
 
-    // Start mDNS discovery service
-    let mut discovery = DiscoveryService::new()?;
-    discovery.announce(&device, DEFAULT_PORT)?;
-    let discovery_rx = discovery.browse()?;
-
     // Start TCP server
     let listener = TcpListener::bind(format!("0.0.0.0:{}", DEFAULT_PORT)).await?;
     info!("📡 Listening on port {}", DEFAULT_PORT);
 
-    // Spawn tasks
-    let state_clone = Arc::clone(&state);
-    tokio::spawn(handle_discovery(discovery_rx, state_clone));
-
+    // Spawn connection acceptor
     let state_clone = Arc::clone(&state);
     tokio::spawn(accept_connections(listener, state_clone));
 
+    // Spawn clipboard monitor
     let state_clone = Arc::clone(&state);
     tokio::spawn(monitor_clipboard(state_clone));
 
-    // Keep the mDNS discovery alive
+    // Start UDP broadcast discovery (simple and reliable)
+    let state_clone = Arc::clone(&state);
+    let device_clone = device.clone();
+    tokio::spawn(udp_broadcast_sender(device_clone));
+    
+    let state_clone2 = Arc::clone(&state);
+    tokio::spawn(udp_broadcast_receiver(state_clone2));
+
+    // Also try mDNS (may work on some networks)
+    if let Ok(mut discovery) = DiscoveryService::new() {
+        let _ = discovery.announce(&device, DEFAULT_PORT);
+        if let Ok(discovery_rx) = discovery.browse() {
+            let state_clone = Arc::clone(&state);
+            tokio::spawn(handle_discovery(discovery_rx, state_clone));
+        }
+        std::mem::forget(discovery);
+    }
+
     info!("🔍 Discovering peers on local network...\n");
 
     // Wait forever (until Ctrl+C)
@@ -128,6 +140,109 @@ async fn main() -> Result<()> {
     info!("\n👋 Shutting down...");
 
     Ok(())
+}
+
+// ============================================================================
+// UDP BROADCAST DISCOVERY (Simple fallback when mDNS is blocked)
+// ============================================================================
+/// Sends UDP broadcast every 2 seconds to announce our presence
+async fn udp_broadcast_sender(device: Device) {
+    let socket = match UdpSocket::bind("0.0.0.0:0") {
+        Ok(s) => s,
+        Err(e) => {
+            debug!("Failed to create UDP socket: {}", e);
+            return;
+        }
+    };
+    
+    if let Err(e) = socket.set_broadcast(true) {
+        debug!("Failed to enable broadcast: {}", e);
+        return;
+    }
+
+    let announce = format!("CLIPSYNC:{}:{}:{}", device.id, device.name, DEFAULT_PORT);
+    let broadcast_addr: SocketAddr = SocketAddr::new(
+        IpAddr::V4(Ipv4Addr::new(255, 255, 255, 255)),
+        BROADCAST_PORT
+    );
+
+    loop {
+        let _ = socket.send_to(announce.as_bytes(), broadcast_addr);
+        tokio::time::sleep(Duration::from_secs(2)).await;
+    }
+}
+
+/// Listens for UDP broadcasts from other ClipSync instances
+async fn udp_broadcast_receiver(state: Arc<AppState>) {
+    let socket = match UdpSocket::bind(format!("0.0.0.0:{}", BROADCAST_PORT)) {
+        Ok(s) => s,
+        Err(e) => {
+            debug!("Failed to bind UDP listener: {}", e);
+            return;
+        }
+    };
+    
+    let _ = socket.set_nonblocking(true);
+    let mut buf = [0u8; 256];
+
+    loop {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        
+        while let Ok((len, src_addr)) = socket.recv_from(&mut buf) {
+            let msg = String::from_utf8_lossy(&buf[..len]);
+            
+            if let Some(parts) = parse_broadcast(&msg) {
+                let (device_id_str, device_name, _port) = parts;
+                
+                // Parse device ID
+                if let Ok(uuid) = uuid::Uuid::parse_str(&device_id_str) {
+                    let device_id = DeviceId::from_uuid(uuid);
+                    
+                    // Skip ourselves
+                    if device_id == state.device.id {
+                        continue;
+                    }
+                    
+                    // Skip if already connected
+                    {
+                        let peers = state.peers.read().await;
+                        if peers.contains_key(&device_id) {
+                            continue;
+                        }
+                    }
+                    
+                    info!("🔎 Found: {} ({})", device_name, &device_id_str[..8]);
+                    
+                    // Connect to peer
+                    let addr = SocketAddr::new(src_addr.ip(), DEFAULT_PORT);
+                    let state_clone = Arc::clone(&state);
+                    tokio::spawn(async move {
+                        if let Err(e) = connect_to_peer_by_addr(addr, state_clone).await {
+                            debug!("Failed to connect: {}", e);
+                        }
+                    });
+                }
+            }
+        }
+    }
+}
+
+fn parse_broadcast(msg: &str) -> Option<(String, String, u16)> {
+    let parts: Vec<&str> = msg.split(':').collect();
+    if parts.len() >= 4 && parts[0] == "CLIPSYNC" {
+        let port = parts[3].parse().unwrap_or(DEFAULT_PORT);
+        return Some((parts[1].to_string(), parts[2].to_string(), port));
+    }
+    None
+}
+
+async fn connect_to_peer_by_addr(addr: SocketAddr, state: Arc<AppState>) -> Result<()> {
+    let stream = tokio::time::timeout(
+        Duration::from_secs(5),
+        TcpStream::connect(addr),
+    ).await??;
+    
+    handle_connection(stream, addr, state, false).await
 }
 
 // ============================================================================

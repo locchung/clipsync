@@ -26,6 +26,9 @@ serde_json = { workspace = true }
 # Date/time
 chrono = { workspace = true }
 
+# UUID for device IDs
+uuid = { workspace = true }
+
 # Error handling
 anyhow = { workspace = true }
 
